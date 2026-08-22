@@ -17,3 +17,8 @@ services:
     envVars:
       - key: SQLITE_PATH
         value: ./searches.db
+      # Guards GET /api/resumes and /api/resumes/export (submitted resume
+      # data). sync: false = set the actual value in the Render dashboard,
+      # never commit it here -- this repo is public.
+      - key: RESUME_ADMIN_TOKEN
+        sync: false
