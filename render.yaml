@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: agent-jobs
+    env: python
+    plan: free
+    # python-jobspy hard-pins NUMPY==1.26.3, which has no wheel for modern Python
+    # and forces a from-source build that can fail outright depending on the
+    # build image. Installing it --no-deps and pulling in current, actually-
+    # compatible versions of its real dependencies ourselves avoids that --
+    # this is the same fix used for local development (see README).
+    buildCommand: >-
+      pip install --no-deps python-jobspy &&
+      pip install fastapi uvicorn pydantic openpyxl httpx pandas numpy
+      beautifulsoup4 markdownify regex requests tls-client
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: SQLITE_PATH
+        value: ./searches.db
