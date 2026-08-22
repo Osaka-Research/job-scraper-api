@@ -95,6 +95,13 @@ def _init_db() -> None:
                     job_type TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_jobs_search_id ON jobs(search_id);
+
+                CREATE TABLE IF NOT EXISTS last_search_start (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    search_term TEXT,
+                    location TEXT,
+                    started_at TEXT
+                );
                 """
             )
             conn.commit()
@@ -235,6 +242,24 @@ async def _send_xlsx_to_bot(xlsx_bytes: bytes, filename: str, caption: str) -> b
         return False
 
 
+async def mark_search_started(search_term: str, location: str) -> None:
+    """Called the instant a search request comes in, before scraping starts --
+    lets /api/admin/stats show what's being searched right now, instead of
+    only after the (often 30-90s) scrape finishes."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _db_lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO last_search_start (id, search_term, location, started_at) "
+                "VALUES (1, ?, ?, ?)",
+                (search_term, location, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 @router.post("/log-search")
 async def log_search(payload: LogSearch) -> dict:
     """internal endpoint: log search + jobs + send xlsx to bot."""
@@ -295,10 +320,14 @@ async def stats(token: str | None = Query(None)) -> dict:
             "SELECT created_at, search_term, location, job_count FROM searches "
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        started = conn.execute(
+            "SELECT search_term, location, started_at FROM last_search_start WHERE id = 1"
+        ).fetchone()
         return {
             "searches_count": n_searches,
             "jobs_count": n_jobs,
             "last_search": dict(last) if last else None,
+            "last_search_start": dict(started) if started else None,
             "telegram_enabled": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         }
     finally:

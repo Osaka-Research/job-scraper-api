@@ -81,6 +81,10 @@ async def scrape(req: ScrapeRequest) -> dict:
     import time as _time
     t0 = _time.time()
     try:
+        await admin.mark_search_started(req.search_term, req.location or "")
+    except Exception:
+        log.exception("mark_search_started failed (non-fatal)")
+    try:
         result = await scraper.scrape(
             search_term=req.search_term,
             location=req.location,
@@ -120,6 +124,11 @@ async def scrape_stream(req: ScrapeRequest):
     line. Lets the frontend show results incrementally instead of waiting for the
     slowest site (LinkedIn/Glassdoor can take 30-60s+ while Indeed is often done
     in a few seconds)."""
+    try:
+        await admin.mark_search_started(req.search_term, req.location or "")
+    except Exception:
+        log.exception("mark_search_started failed (non-fatal)")
+
     async def body():
         import time as _time
         t0 = _time.time()
