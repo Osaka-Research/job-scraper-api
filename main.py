@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 import scraper
 import admin
 import resumes
+import clicks
 
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -51,6 +52,7 @@ app.add_middleware(
 
 app.include_router(resumes.router)
 app.include_router(admin.router)
+app.include_router(clicks.router)
 
 
 class ScrapeRequest(BaseModel):
