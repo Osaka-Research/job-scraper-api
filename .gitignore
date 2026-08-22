@@ -1,0 +1,6 @@
+.venv/
+.venv-debian/
+__pycache__/
+*.pyc
+searches.db
+test_pydoll.py
