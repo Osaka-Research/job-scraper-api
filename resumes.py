@@ -11,8 +11,9 @@ inserting a duplicate.
 Endpoints:
   POST /api/resumes         — public: finalize a submission (status=submitted)
   PUT  /api/resumes/draft   — public: auto-save in-progress answers (status=draft)
-  GET  /api/resumes         — admin: list submissions (requires ?token=, optional ?status=draft|submitted)
-  GET  /api/resumes/export  — admin: xlsx of submissions (requires ?token=, optional ?status=)
+  GET    /api/resumes         — admin: list submissions (requires ?token=, optional ?status=draft|submitted)
+  GET    /api/resumes/export  — admin: xlsx of submissions (requires ?token=, optional ?status=)
+  DELETE /api/resumes/{id}    — admin: remove one row (requires ?token=)
 
 Env:
   RESUME_ADMIN_TOKEN  — shared secret required to read/export submissions.
@@ -312,3 +313,18 @@ async def export_resumes(token: str | None = Query(None), status: str = Query("a
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+@router.delete("/{resume_id}")
+async def delete_resume(resume_id: int, token: str | None = Query(None)) -> dict:
+    _require_admin(token)
+    with _db_lock:
+        conn = _connect()
+        try:
+            cur = conn.execute("DELETE FROM resumes WHERE id = ?", (resume_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="No resume with that id.")
+    return {"ok": True, "deleted": resume_id}
