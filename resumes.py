@@ -1,16 +1,18 @@
 """
 resumes.py — talent-pool submissions from the Resume Builder site.
 
-The Resume Builder (a separate static site) is local-only by default: typed
-data lives in that browser's localStorage and never leaves the device unless
-the visitor explicitly clicks "Submit to talent pool" on the final resume
-step. That button POSTs here. There is no silent/automatic collection --
-every row in this table is something a visitor deliberately chose to send.
+The Resume Builder auto-saves progress to this backend as the visitor types
+(one row per browser, keyed by a client-generated session_id), status=draft.
+This is disclosed on the page before the first field, by design -- nothing
+here is silent. Clicking "Submit to talent pool" on the final step marks
+that same row status=submitted (finalized, ready for review) instead of
+inserting a duplicate.
 
 Endpoints:
-  POST /api/resumes         — public: a visitor submits their resume
-  GET  /api/resumes         — admin: list all submissions (requires ?token=)
-  GET  /api/resumes/export  — admin: xlsx of all submissions (requires ?token=)
+  POST /api/resumes         — public: finalize a submission (status=submitted)
+  PUT  /api/resumes/draft   — public: auto-save in-progress answers (status=draft)
+  GET  /api/resumes         — admin: list submissions (requires ?token=, optional ?status=draft|submitted)
+  GET  /api/resumes/export  — admin: xlsx of submissions (requires ?token=, optional ?status=)
 
 Env:
   RESUME_ADMIN_TOKEN  — shared secret required to read/export submissions.
@@ -82,6 +84,24 @@ def _init_db() -> None:
 _init_db()
 
 
+def _ensure_columns() -> None:
+    with _db_lock:
+        conn = _connect()
+        try:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(resumes)")}
+            if "session_id" not in cols:
+                conn.execute("ALTER TABLE resumes ADD COLUMN session_id TEXT")
+            if "status" not in cols:
+                conn.execute("ALTER TABLE resumes ADD COLUMN status TEXT DEFAULT 'submitted'")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_resumes_session_id ON resumes(session_id)")
+            conn.commit()
+        finally:
+            conn.close()
+
+
+_ensure_columns()
+
+
 class ExperienceEntry(BaseModel):
     title: str = ""
     company: str = ""
@@ -110,6 +130,7 @@ class ResumeSubmission(BaseModel):
     skills: str = ""
     experience: list[ExperienceEntry] = Field(default_factory=list)
     education: list[EducationEntry] = Field(default_factory=list)
+    session_id: str = ""
 
 
 def _require_admin(token: str | None) -> None:
@@ -117,6 +138,13 @@ def _require_admin(token: str | None) -> None:
         raise HTTPException(status_code=503, detail="Admin access not configured (RESUME_ADMIN_TOKEN unset).")
     if token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid or missing token.")
+
+
+def _has_content(payload: ResumeSubmission) -> bool:
+    return bool(
+        payload.name or payload.email or payload.summary or payload.skills
+        or payload.experience or payload.education
+    )
 
 
 @router.post("")
@@ -128,18 +156,37 @@ async def submit_resume(payload: ResumeSubmission) -> dict:
     with _db_lock:
         conn = _connect()
         try:
-            conn.execute(
-                """
-                INSERT INTO resumes
-                    (submitted_at, name, headline, email, phone, location, link, summary, skills, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    now, payload.name, payload.headline, payload.email, payload.phone,
-                    payload.location, payload.link, payload.summary, payload.skills,
-                    payload.model_dump_json(),
-                ),
-            )
+            existing = None
+            if payload.session_id:
+                existing = conn.execute(
+                    "SELECT id FROM resumes WHERE session_id = ?", (payload.session_id,)
+                ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE resumes SET submitted_at=?, name=?, headline=?, email=?, phone=?,
+                        location=?, link=?, summary=?, skills=?, raw_json=?, status='submitted'
+                    WHERE id=?
+                    """,
+                    (
+                        now, payload.name, payload.headline, payload.email, payload.phone,
+                        payload.location, payload.link, payload.summary, payload.skills,
+                        payload.model_dump_json(), existing["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO resumes
+                        (submitted_at, name, headline, email, phone, location, link, summary, skills, raw_json, session_id, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted')
+                    """,
+                    (
+                        now, payload.name, payload.headline, payload.email, payload.phone,
+                        payload.location, payload.link, payload.summary, payload.skills,
+                        payload.model_dump_json(), payload.session_id,
+                    ),
+                )
             conn.commit()
         finally:
             conn.close()
@@ -148,15 +195,71 @@ async def submit_resume(payload: ResumeSubmission) -> dict:
     return {"ok": True}
 
 
+@router.put("/draft")
+async def save_draft(payload: ResumeSubmission) -> dict:
+    if not payload.session_id:
+        raise HTTPException(status_code=400, detail="session_id required.")
+    if not _has_content(payload):
+        return {"ok": True, "skipped": True}
+
+    now = datetime.now(timezone.utc).isoformat()
+    with _db_lock:
+        conn = _connect()
+        try:
+            existing = conn.execute(
+                "SELECT id, status FROM resumes WHERE session_id = ?", (payload.session_id,)
+            ).fetchone()
+            if existing and existing["status"] == "submitted":
+                # already finalized -- don't let a stray autosave clobber it
+                return {"ok": True, "skipped": True}
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE resumes SET submitted_at=?, name=?, headline=?, email=?, phone=?,
+                        location=?, link=?, summary=?, skills=?, raw_json=?
+                    WHERE id=?
+                    """,
+                    (
+                        now, payload.name, payload.headline, payload.email, payload.phone,
+                        payload.location, payload.link, payload.summary, payload.skills,
+                        payload.model_dump_json(), existing["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO resumes
+                        (submitted_at, name, headline, email, phone, location, link, summary, skills, raw_json, session_id, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')
+                    """,
+                    (
+                        now, payload.name, payload.headline, payload.email, payload.phone,
+                        payload.location, payload.link, payload.summary, payload.skills,
+                        payload.model_dump_json(), payload.session_id,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    return {"ok": True}
+
+
 @router.get("")
-async def list_resumes(token: str | None = Query(None)) -> dict:
+async def list_resumes(token: str | None = Query(None), status: str = Query("all")) -> dict:
     _require_admin(token)
     conn = _connect()
     try:
-        rows = conn.execute(
-            "SELECT id, submitted_at, name, headline, email, phone, location, link, summary, skills, raw_json "
-            "FROM resumes ORDER BY id DESC"
-        ).fetchall()
+        query = (
+            "SELECT id, submitted_at, status, session_id, name, headline, email, phone, "
+            "location, link, summary, skills, raw_json FROM resumes"
+        )
+        params: tuple = ()
+        if status in ("draft", "submitted"):
+            query += " WHERE status = ?"
+            params = (status,)
+        query += " ORDER BY id DESC"
+        rows = conn.execute(query, params).fetchall()
         return {
             "count": len(rows),
             "resumes": [
@@ -169,26 +272,32 @@ async def list_resumes(token: str | None = Query(None)) -> dict:
 
 
 @router.get("/export")
-async def export_resumes(token: str | None = Query(None)) -> Response:
+async def export_resumes(token: str | None = Query(None), status: str = Query("all")) -> Response:
     _require_admin(token)
     conn = _connect()
     try:
-        rows = conn.execute(
-            "SELECT id, submitted_at, name, headline, email, phone, location, link, summary, skills "
-            "FROM resumes ORDER BY id DESC"
-        ).fetchall()
+        query = (
+            "SELECT id, submitted_at, status, name, headline, email, phone, location, link, summary, skills "
+            "FROM resumes"
+        )
+        params: tuple = ()
+        if status in ("draft", "submitted"):
+            query += " WHERE status = ?"
+            params = (status,)
+        query += " ORDER BY id DESC"
+        rows = conn.execute(query, params).fetchall()
     finally:
         conn.close()
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Resumes"
-    headers = ["ID", "Submitted", "Name", "Headline", "Email", "Phone", "Location", "Link", "Summary", "Skills"]
+    headers = ["ID", "Submitted", "Status", "Name", "Headline", "Email", "Phone", "Location", "Link", "Summary", "Skills"]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = openpyxl.styles.Font(bold=True)
     for r in rows:
-        ws.append([r["id"], r["submitted_at"], r["name"], r["headline"], r["email"],
+        ws.append([r["id"], r["submitted_at"], r["status"], r["name"], r["headline"], r["email"],
                    r["phone"], r["location"], r["link"], r["summary"], r["skills"]])
     for col in ws.columns:
         width = max((len(str(c.value or "")) for c in col), default=10)
