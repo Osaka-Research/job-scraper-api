@@ -119,6 +119,12 @@ async def scrape_stream(req: ScrapeRequest):
     slowest site (LinkedIn/Glassdoor can take 30-60s+ while Indeed is often done
     in a few seconds)."""
     async def body():
+        import time as _time
+        t0 = _time.time()
+        all_jobs: list[dict] = []
+        sites_used: list[str] = []
+        job_count = 0
+
         try:
             async for chunk in scraper.scrape_streaming(
                 search_term=req.search_term,
@@ -129,9 +135,32 @@ async def scrape_stream(req: ScrapeRequest):
                 timeout_seconds=req.timeout_seconds,
                 country_indeed=req.country_indeed,
             ):
+                if chunk.get("done"):
+                    job_count = chunk.get("count", 0)
+                    sites_used = chunk.get("sites", [])
+                else:
+                    all_jobs.extend(chunk.get("jobs", []))
                 yield json.dumps(chunk) + "\n"
         except ValueError as e:
             yield json.dumps({"done": True, "error": str(e), "count": 0}) + "\n"
+            return
+
+        # log + send to telegram (best-effort, does not block the response)
+        try:
+            elapsed = round(_time.time() - t0, 2)
+            await admin.log_search(admin.LogSearch(
+                search_term=req.search_term,
+                location=req.location or "",
+                sites=sites_used,
+                hours_old=req.hours_old or scraper.DEFAULT_HOURS_OLD,
+                results_wanted=req.results_wanted or scraper.DEFAULT_RESULTS_WANTED,
+                job_count=job_count,
+                ok=True,
+                duration_seconds=elapsed,
+                jobs=[admin.LogJob(**j) for j in all_jobs],
+            ))
+        except Exception:
+            log.exception("admin log_search failed (non-fatal)")
 
     return StreamingResponse(body(), media_type="application/x-ndjson")
 
