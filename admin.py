@@ -28,7 +28,7 @@ from pathlib import Path
 
 import httpx
 import openpyxl
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("agent-jobs.admin")
@@ -39,8 +39,16 @@ DB_PATH = Path(os.getenv("SQLITE_PATH", "./searches.db"))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+ADMIN_TOKEN = os.getenv("RESUME_ADMIN_TOKEN", "")
 
 _db_lock = threading.Lock()
+
+
+def _require_admin(token: str | None) -> None:
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="Admin access not configured (RESUME_ADMIN_TOKEN unset).")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid or missing token.")
 
 
 def _connect() -> sqlite3.Connection:
@@ -277,7 +285,8 @@ async def log_search(payload: LogSearch) -> dict:
 
 
 @router.get("/stats")
-async def stats() -> dict:
+async def stats(token: str | None = Query(None)) -> dict:
+    _require_admin(token)
     conn = _connect()
     try:
         n_searches = conn.execute("SELECT COUNT(*) AS n FROM searches").fetchone()["n"]
@@ -297,7 +306,8 @@ async def stats() -> dict:
 
 
 @router.get("/export")
-async def export() -> Response:
+async def export(token: str | None = Query(None)) -> Response:
+    _require_admin(token)
     wb = _build_searches_workbook()
     buf = io.BytesIO()
     wb.save(buf)
