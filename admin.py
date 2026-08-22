@@ -305,6 +305,33 @@ async def stats(token: str | None = Query(None)) -> dict:
         conn.close()
 
 
+@router.get("/searches")
+async def list_searches(token: str | None = Query(None), limit: int = Query(500, ge=1, le=2000)) -> dict:
+    _require_admin(token)
+    conn = _connect()
+    try:
+        searches = conn.execute(
+            "SELECT * FROM searches ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        search_ids = [s["id"] for s in searches]
+        jobs_by_search: dict[int, list[dict]] = {}
+        if search_ids:
+            placeholders = ",".join("?" * len(search_ids))
+            for j in conn.execute(
+                f"SELECT * FROM jobs WHERE search_id IN ({placeholders})", search_ids
+            ).fetchall():
+                jobs_by_search.setdefault(j["search_id"], []).append(dict(j))
+        return {
+            "count": len(searches),
+            "searches": [
+                {**dict(s), "jobs": jobs_by_search.get(s["id"], [])}
+                for s in searches
+            ],
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/export")
 async def export(token: str | None = Query(None)) -> Response:
     _require_admin(token)
