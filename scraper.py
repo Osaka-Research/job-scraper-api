@@ -76,6 +76,14 @@ def _job_to_dict(row: Any) -> dict[str, Any]:
     }
 
 
+# matches the <li data-value=...> options in the country dropdown (index.html)
+COUNTRY_LABELS = {
+    "usa": "USA", "india": "India", "uk": "UK", "canada": "Canada",
+    "australia": "Australia", "germany": "Germany", "singapore": "Singapore",
+    "uae": "UAE",
+}
+
+
 def _scrape_sync(
     sites: list[str],
     search_term: str,
@@ -85,10 +93,14 @@ def _scrape_sync(
     country_indeed: str,
 ) -> list[dict[str, Any]]:
     """the actual blocking jobspy call. runs in a thread."""
+    # LinkedIn/Google/etc. key off `location` alone, not `country_indeed` (that
+    # only scopes Indeed/Glassdoor) -- so an empty location must still fall back
+    # to the *selected* country, not a hardcoded "USA", or those sites keep
+    # returning US jobs no matter what country was picked.
     df: pd.DataFrame = scrape_jobs(
         site_name=sites,
         search_term=search_term,
-        location=location or "USA",
+        location=location or COUNTRY_LABELS.get(country_indeed.lower(), country_indeed or "USA"),
         hours_old=hours_old,
         results_wanted=results_wanted,
         country_indeed=country_indeed,
